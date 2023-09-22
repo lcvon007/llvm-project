@@ -105,6 +105,7 @@
 #include "llvm/Transforms/Scalar/LoopSink.h"
 #include "llvm/Transforms/Scalar/LoopUnrollAndJamPass.h"
 #include "llvm/Transforms/Scalar/LoopUnrollPass.h"
+#include "llvm/Transforms/Scalar/LoopVersioningLICM.h"
 #include "llvm/Transforms/Scalar/LowerConstantIntrinsics.h"
 #include "llvm/Transforms/Scalar/LowerExpectIntrinsic.h"
 #include "llvm/Transforms/Scalar/LowerMatrixIntrinsics.h"
@@ -270,6 +271,10 @@ static cl::opt<AttributorRunOption> AttributorRun(
                           "enable call graph SCC attributor runs"),
                clEnumValN(AttributorRunOption::NONE, "none",
                           "disable attributor runs")));
+
+static cl::opt<bool> UseLoopVersioningLICM(
+    "enable-loop-versioning-licm", cl::init(false), cl::Hidden,
+    cl::desc("Enable the experimental Loop Versioning LICM pass"));
 
 cl::opt<bool> EnableMemProfContextDisambiguation(
     "enable-memprof-context-disambiguation", cl::init(false), cl::Hidden,
@@ -1292,6 +1297,21 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // large bodies.
   if (RunPartialInlining)
     MPM.addPass(PartialInlinerPass());
+
+  // Scheduling LoopVersioningLICM when inlining is over, because after that
+  // we may see more accurate aliasing. Reason to run this late is that too
+  // early versioning may prevent further inlining due to increase of code
+  // size. By placing it just after inlining other optimizations which runs
+  // later might get benefit of no-alias assumption in clone loop.
+  if (UseLoopVersioningLICM) {
+    MPM.addPass(createModuleToFunctionPassAdaptor(
+        createFunctionToLoopPassAdaptor(LoopVersioningLICMPass())));
+    MPM.addPass(
+        createModuleToFunctionPassAdaptor(createFunctionToLoopPassAdaptor(
+            LICMPass(PTO.LicmMssaOptCap, PTO.LicmMssaNoAccForPromotionCap,
+                     /*AllowSpeculation=*/true),
+            /*USeMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false)));
+  }
 
   // Remove avail extern fns and globals definitions since we aren't compiling
   // an object file for later LTO. For LTO we want to preserve these so they
